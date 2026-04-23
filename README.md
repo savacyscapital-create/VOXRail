@@ -1,14 +1,24 @@
 # VoxRail
-### AI-powered Railway Systems Engineering Assistant
+### AI-Powered Railway Systems Engineering Assistant
 
-> Developed by [Savacys Capital](https://github.com/SavacysCapital)  
-> Licence: AGPL-3.0 | Status: Active Development  
-> Commercial licensing available — contact us for enquiries
+> **Developer:** [Savacys Capital](https://github.com/SavacysCapital)  
+> **Status:** Active Development  
+> **Open Source:** [AGPL-3.0](./LICENSE) (Free for Personal & Open Research)  
+> **Commercial:** [Enterprise License Available](./Commercial-Licensing.md)
 
-VoxRail is a domain-specific AI assistant for railway systems engineers.
-It generates structured engineering artefacts from natural language input,
-maintaining full traceability across the entire artefact chain within a
-single stateful session.
+---
+
+VoxRail is a domain-specific AI assistant purpose-built for railway systems engineering. It transforms natural language requirements into structured engineering artefacts while maintaining **100% traceability** across the lifecycle.
+
+## 🚀 Core Capabilities
+* **Artefact Generation:** Automated creation of Concept of Operations (ConOps), System Requirements, and Interface Specifications.
+* **Stateful Continuity:** Maintains a single "engineering state" across sessions, ensuring data consistency.
+* **Regulatory Alignment:** Designed to assist with standards like EN 50126/128/129.
+
+## ⚖️ Licensing
+VoxRail is dual-licensed to support both the open-source community and professional engineering firms:
+* **Community Edition:** Free under the GNU AGPLv3. Ideal for students, hobbyists, and open-source contributors.
+* **Commercial Edition:** Required for use within a commercial entity. Provides proprietary integration rights and removes AGPL "share-alike" requirements. [Learn more about Commercial Licensing](./Commercial-Licensing.md).
 
 ---
 
