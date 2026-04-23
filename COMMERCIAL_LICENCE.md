@@ -1,32 +1,24 @@
 # Commercial Licensing — VoxRail
 
-VoxRail is open source under AGPL-3.0 for non-commercial use.
+VoxRail is dual-licensed. While it is available for free under the **AGPL-3.0** for personal use and open-source contributions, a **Commercial License** is required for professional and corporate environments.
 
-## When do you need a commercial licence?
+## Why a Commercial License?
+The standard AGPL-3.0 license requires that any infrastructure or software interacting with VoxRail over a network must also be open-sourced. Most commercial organizations prefer a **Commercial License** to:
+- Use VoxRail within proprietary internal workflows.
+- Avoid the "copyleft" requirements of the AGPL-3.0.
+- Integrate VoxRail into closed-source commercial products.
+- Receive dedicated support and deployment assistance.
 
-A commercial licence is required if you:
+## When do you need a Commercial License?
+You should contact us for a commercial agreement if you:
+1. **Use VoxRail for Profit:** Utilizing the tool for client projects, paid consultancy, or internal commercial engineering.
+2. **SaaS Deployment:** Hosting VoxRail as a service for your organization without releasing your infrastructure source code.
+3. **White-Labeling:** Removing "Savacys Capital" or "VoxRail" branding for internal or external distribution.
+4. **Proprietary Integration:** Linking VoxRail with closed-source ALM tools like IBM DOORS or Siemens Polarion.
 
-- Use VoxRail within a commercial organisation for internal projects
-- Integrate VoxRail into a product or service you sell or charge for
-- Deploy VoxRail as a hosted or SaaS service for paying customers
-- White-label or rebrand VoxRail
-- Modify VoxRail and do not wish to
+## Contact for Licensing
+License fees are structured based on organization size and deployment scale. To discuss a custom agreement, please contact: 
 
-## What does a commercial licence provide?
-
-- Full rights to use VoxRail in commercial contexts
-- No obligation to release modifications under AGPL
-- Right to integrate into proprietary products
-- Optional: dedicated support, customisation, training
-
-## How to obtain a commercial licence
-
-Contact Savacys Capital to discuss your requirements:
-[your email address]
-
-Licence fees are agreed on a case-by-case basis depending on:
-- Organisation size
-- Use case and deployment scale
-- Whether white-labelling is required
+**Savacys Capital** Email: [savacyscapital@gmail.com](mailto:savacyscapital@gmail.com)
 
 © 2026 Savacys Capital. All rights reserved.
