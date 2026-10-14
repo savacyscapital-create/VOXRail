@@ -24,11 +24,20 @@ Artefact types supported:
 Logging:
   voxrail_interactions.json  — every message (full audit trail)
   voxrail_artefacts.json     — structured artefact register (all types)
+
+Plugins:
+  Loaded from VOXRAIL_PLUGINS (comma-separated module names, default
+  "voxrail_cm"; set to "" to disable). A plugin module exposes `plugin`
+  with optional hooks:
+    on_response(session, text)  — after every LLM response
+    prompt_context(session)     — extra text for the system prompt
 """
 
 import os
 import re
 import json
+import logging
+import importlib
 from datetime import datetime
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -66,6 +75,44 @@ FMEA_PATTERN = re.compile(r"^\*\*FMEA Ref\*\*",               re.MULTILINE)
 HZ_PATTERN   = re.compile(r"^\*\*Hazard Ref\*\*",             re.MULTILINE)
 ELEC_PATTERN = re.compile(r"^\*\*Electrical Diagram Ref\*\*",  re.MULTILINE)
 CODE_PATTERN = re.compile(r"^\*\*Code Ref\*\*",               re.MULTILINE)
+SD_PATTERN   = re.compile(r"^\*\*State Diagram Ref\*\*",      re.MULTILINE)
+
+
+# ── Plugins ────────────────────────────────────────────────────────────────────
+plugin_logger = logging.getLogger("voxrail.plugins")
+PLUGINS: list = []
+
+
+def register_plugin(plugin) -> None:
+    if plugin not in PLUGINS:
+        PLUGINS.append(plugin)
+
+
+def load_plugins() -> None:
+    names = os.getenv("VOXRAIL_PLUGINS", "voxrail_cm")
+    for name in filter(None, (n.strip() for n in names.split(","))):
+        try:
+            register_plugin(importlib.import_module(name).plugin)
+            plugin_logger.info("Plugin loaded: %s", name)
+        except Exception as e:
+            plugin_logger.warning("Plugin %s not loaded: %s", name, e)
+
+
+def emit(hook: str, *args) -> list:
+    """Call `hook` on every plugin. A failing plugin never breaks the chat."""
+    results = []
+    for p in PLUGINS:
+        fn = getattr(p, hook, None)
+        if fn is None:
+            continue
+        try:
+            results.append(fn(*args))
+        except Exception:
+            plugin_logger.exception("Plugin %s failed in %s", getattr(p, "name", p), hook)
+    return results
+
+
+load_plugins()
 
 
 # ── Session ────────────────────────────────────────────────────────────────────
@@ -94,6 +141,7 @@ class VoxRailSession:
         self._hz_counter:   int = 0
         self._elec_counter: int = 0
         self._code_counter: int = 0
+        self._sd_counter:   int = 0
 
         # ── Conversation history ─────────────────────────────
         self.history: list = []
@@ -120,6 +168,8 @@ class VoxRailSession:
     def elec_counter(self) -> int: return self._elec_counter
     @property
     def code_counter(self) -> int: return self._code_counter
+    @property
+    def sd_counter(self)   -> int: return self._sd_counter
 
     # ── Next-ref peek (no side effects) ──────────────────────────────────────
     def peek_uc_ref(self)   -> str:
@@ -134,6 +184,8 @@ class VoxRailSession:
         return f"ED-{self.project_code}-{self._elec_counter + 1:03d}"
     def peek_code_ref(self) -> str:
         return f"CC-{self.project_code}-{self._code_counter + 1:03d}"
+    def peek_sd_ref(self)   -> str:
+        return f"SD-{self.project_code}-{self._sd_counter   + 1:03d}"
 
     # ── Single mutation point ─────────────────────────────────────────────────
     def update_from_response(self, response: str) -> None:
@@ -150,6 +202,7 @@ class VoxRailSession:
                 self.last_electrical = response
             else:
                 self.last_state_diagram = response
+                self._sd_counter += 1
 
         if FMEA_PATTERN.search(response):
             self._fmea_counter += 1
@@ -212,6 +265,7 @@ class VoxRailSession:
             "hz_counter":     self.hz_counter,
             "elec_counter":   self.elec_counter,
             "code_counter":   self.code_counter,
+            "sd_counter":     self.sd_counter,
             "history_len":    len(self.history),
             "has_last_uc":    self.last_use_case      is not None,
             "has_last_sd":    self.last_state_diagram  is not None,
@@ -279,6 +333,8 @@ def build_system_prompt(session: VoxRailSession) -> str:
             "=== END LAST C CODE ===\n"
         )
 
+    plugin_context = "".join(c for c in emit("prompt_context", session) if c)
+
     history_note = ""
     if len(session.history) > MAX_HISTORY_MESSAGES // 2:
         history_note = (
@@ -298,7 +354,8 @@ Next FM : {session.peek_fmea_ref()}
 Next HZ : {session.peek_hz_ref()}
 Next ED : {session.peek_elec_ref()}
 Next CC : {session.peek_code_ref()}
-{history_note}{memory}
+Next SD : {session.peek_sd_ref()}
+{history_note}{memory}{plugin_context}
 
 ════════════════════════════════════════════════════════
 USE CASE TEMPLATE  (reproduce exactly — no deviations)
@@ -308,8 +365,10 @@ USE CASE TEMPLATE  (reproduce exactly — no deviations)
 **Use Case Description**:
 **Previous Train / System State**:
 **New Train / System State**:
+**Applicable Train States**: [comma-separated; every train state this use case can occur in — one or more]
 **State Transition Expected Time**:
-**Primary Actors**:
+**Primary Actors**: [comma-separated]
+**Logical Interfaces**: [comma-separated signals / buses this use case relies on, if known]
 **Trigger**:
 **Trigger Type**: [Automatic | Manual | Timed | Conditional]
 **Preconditions**:
@@ -341,6 +400,10 @@ Do NOT populate with states, values, or expected results.
 ════════════════════════════════════════════════════════
 STATE DIAGRAM
 ════════════════════════════════════════════════════════
+**State Diagram Ref**: {session.peek_sd_ref()}
+**Related UC**:
+**Train States Modelled**: [comma-separated train states this diagram designs]
+
 Generate valid Mermaid v10+ stateDiagram-v2 syntax in triple backticks.
 Use logical railway state names. Include all degraded modes from the Use Case.
 
@@ -413,6 +476,8 @@ and voltage or protocol where applicable.
 **Electrical Diagram Ref**: {session.peek_elec_ref()}
 **Related UC**:
 **System / Function**:
+**Train States Served**: [comma-separated train states this logic realises]
+**Logical Interfaces**: [semicolon-separated "Signal name, Type, Voltage/Protocol"; same names as the arrow labels]
 **Voltage Domain**: [24V DC | 110V DC | 750V DC | 25kV AC | Mixed]
 **Interface Standard**: [CAN | MVB | Ethernet | Discrete | Analogue | Mixed]
 **Diagram Notes**:
@@ -519,7 +584,7 @@ RULES  (apply to every response without exception)
    ⚠️ VARIATION ORDER DETECTED: [one-line description]
    if the request is outside current agreed scope. Then continue.
 
-3. Always use the exact reference shown above (Next UC/TC/FM/HZ/ED/CC).
+3. Always use the exact reference shown above (Next UC/TC/SD/FM/HZ/ED/CC).
    Never write XXX or any placeholder.
 
 4. Memory references:
@@ -544,6 +609,9 @@ RULES  (apply to every response without exception)
 9. C code must follow MISRA-C:2012 transition table pattern.
    All action functions declared as stubs with clear comments.
    Include EN50128 file header with SIL level placeholder.
+
+10. Train state, actor and interface names: reuse the exact names from the
+    CONFIGURATION CATALOGUE when one is shown. They link artefacts together.
 """
 
 
@@ -560,6 +628,7 @@ def chat(session: VoxRailSession, user_input: str) -> str:
 
     session.history.append(AIMessage(content=response_text))
     session.update_from_response(response_text)
+    emit("on_response", session, response_text)
 
     return response_text
 
@@ -599,9 +668,10 @@ def log_artefact(session: VoxRailSession, response: str) -> None:
         m = re.search(r"\*\*Code Ref\*\*:\s*(.+)", response)
         ref = m.group(1).strip() if m else f"CC-{session.project_code}-{session.code_counter:03d}"
 
-    elif "```mermaid" in response:
+    elif SD_PATTERN.search(response) or "```mermaid" in response:
         artefact_type = "STATE_DIAGRAM"
-        ref = f"SD-{session.project_code}-{session.uc_counter:03d}"
+        m = re.search(r"\*\*State Diagram Ref\*\*:\s*(.+)", response)
+        ref = m.group(1).strip() if m else f"SD-{session.project_code}-{session.sd_counter:03d}"
 
     if not artefact_type:
         return
@@ -674,7 +744,7 @@ if __name__ == "__main__":
 
     print(f"\nProject code : {session.project_code}")
     print(f"History limit: {MAX_HISTORY_MESSAGES} messages")
-    print("Commands: /memory  /scope  /hazards  exit\n")
+    print("Commands: /memory  /scope  /hazards  /cm  exit\n")
 
     while True:
         try:
@@ -713,6 +783,19 @@ if __name__ == "__main__":
                     print(f"  {i}. [{h['timestamp']}] {h['hz_ref']}")
             else:
                 print("\n✅ No hazards logged this session.")
+            print()
+            continue
+
+        if user_input.lower() == "/cm":
+            try:
+                from voxrail_cm import graph as cm_graph
+                from voxrail_cm.store import get_store
+                store = get_store(session.project_code)
+                print("\n🔗 Configuration graph")
+                print(json.dumps(cm_graph.summary(store), indent=2))
+                print("Gaps:", json.dumps(cm_graph.gaps(store), indent=2))
+            except Exception as e:
+                print(f"\nConfiguration management plugin unavailable: {e}")
             print()
             continue
 

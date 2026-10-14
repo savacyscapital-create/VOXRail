@@ -33,7 +33,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import uvicorn
 
-from main import VoxRailSession, chat, log_interaction
+from main import VoxRailSession, chat, log_interaction, PLUGINS
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -118,6 +118,17 @@ app = FastAPI(title="VoxRail - Railway AI Assistant", lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
 
 
+# ── Configuration management plugin routes (/cm) ──────────────────────────────
+def project_code_for_cookie(session_id: str | None) -> str | None:
+    entry = SESSION_STORE.get(session_id) if session_id else None
+    return entry.session.project_code if entry else None
+
+
+if any(getattr(p, "name", "") == "config_management" for p in PLUGINS):
+    from voxrail_cm.api import make_router
+    app.include_router(make_router(project_code_for_cookie))
+
+
 # ── Models ─────────────────────────────────────────────────────────────────────
 class ChatRequest(BaseModel):
     content: str
@@ -132,6 +143,7 @@ class ChatResponse(BaseModel):
     hz_counter:   int
     elec_counter: int
     code_counter: int
+    sd_counter:   int
     train_type:   str | None
     project:      str
 
@@ -197,6 +209,7 @@ async def chat_endpoint(
         hz_counter   = session.hz_counter,
         elec_counter = session.elec_counter,
         code_counter = session.code_counter,
+        sd_counter   = session.sd_counter,
         train_type   = session.train_type,
         project      = session.project_name,
     )
@@ -213,7 +226,8 @@ async def health():
         "session_ttl_hrs": SESSION_TTL_HOURS,
         "llm_model":       "llama-3.3-70b-versatile",
         "version":         "3.0",
-        "artefacts":       ["UC", "TC", "SD", "FM", "HZ", "ED", "CC"]
+        "artefacts":       ["UC", "TC", "SD", "FM", "HZ", "ED", "CC"],
+        "plugins":         [getattr(p, "name", str(p)) for p in PLUGINS],
     }
 
 
@@ -246,6 +260,8 @@ if __name__ == "__main__":
     print("  UI           → http://127.0.0.1:8000")
     print("  Health       → http://127.0.0.1:8000/health")
     print("  Session info → http://127.0.0.1:8000/session/info")
+    if PLUGINS:
+        print("  Config graph → http://127.0.0.1:8000/cm/view")
     print(f"  Session TTL  → {SESSION_TTL_HOURS}h (VOXRAIL_SESSION_TTL to change)")
     print("─" * 50)
 
