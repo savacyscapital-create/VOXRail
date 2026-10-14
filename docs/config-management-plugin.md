@@ -1,6 +1,6 @@
 # VoxRail Configuration Management Plugin — Feasibility & Design
 
-Status: **Phase 1 built** (2026-10-14) in `voxrail_cm/`, `main.py`, `app.py`; not yet pushed to GitHub. Phases 2–3 proposed. Based on `app.py` / `main.py` v3.0 in the project files (same code as GitHub `savacyscapital-create/VOXRail`).
+Status: **Phase 1, matrix views and Phase 2 built** (2026-10-14). Phase 3 (baselines, chat intents) proposed. Based on `app.py` / `main.py` v3.0 in the project files (same code as GitHub `savacyscapital-create/VOXRail`).
 
 ## 1. Verdict
 
@@ -131,6 +131,16 @@ The graph diagram is only for small, focused views; matrices are the main tool o
 
 Filters (same on page, CSV and Excel): `row`, `col`, `actor`, `state`, `gaps_only`, `hide_empty`. Phase 2 impact / verification scope reports will reuse this matrix format.
 
+## 6b. Change management as built (Phase 2, `voxrail_cm/change.py`)
+
+- **Change request** `CR-<PROJECT>-nnn`: title, description, status (Draft → Open → Assessed → Approved → Implemented → Verified → Closed / Rejected), history, and changed items (artefact refs or `state:` / `interface:` / `actor:` names, each add / modify / remove).
+- **Impact categories**, most to least direct: Changed · Direct dependent · Coupled via state · Coupled via interface · Coupled via actor (opt-in, since a shared Driver would couple almost everything) · Logical design · Indirect dependent. Each item carries the reason path.
+- **Safety flag**: every hazard, any FMEA with Severity Critical/Catastrophic, and any use case those hang off.
+- **Verification scope**: per impacted use case, tests to re-run, "new test needed" when none exists, FMEA / hazard re-review, electrical / software re-check; plus logical items to re-check and a justified out-of-scope list.
+- **Assess and record** freezes impact + scope with the artefact versions at that moment; later reads report which artefacts changed since.
+- **Variation orders** flagged by VoxRail create a Draft CR targeting the artefacts in that response.
+- Page `/cm/changes`; exports: CSV per table, Excel report with impact / verification_scope / out_of_scope sheets.
+
 ## 7. API / chat surface (`/cm`)
 
 - `GET /cm/graph?layer=1|2|both` · `GET /cm/artefact/{ref}` · `GET /cm/uc/{ref}/coupled`
@@ -143,7 +153,7 @@ Filters (same on page, CSV and Excel): `row`, `col`, `actor`, `state`, `gaps_onl
 ## 8. Phasing
 
 1. **Phase 1** — plugin hook, SQLite store, train state catalogue, template additions, parser, layer 1 + layer 2 auto-linking, `/cm/graph` + state view.
-2. **Phase 2** — change requests, impact engine, verification scope, exports.
+2. **Phase 2 (built)** — change requests, impact engine, verification scope, exports.
 3. **Phase 3** — baselines & diffs, alias confirmation UI, chat intents, graph visualisation in the web UI.
 
 ## 9. Open questions

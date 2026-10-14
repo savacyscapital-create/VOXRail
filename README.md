@@ -150,6 +150,19 @@ near-duplicate names are suggested for merging, never merged silently.
 | `/cm/states`, `/cm/states/{name}` | Train state catalogue and per-state view |
 | `/cm/uc/{ref}/coupled` | Use cases coupled through shared states / actors / interfaces |
 | `/cm/gaps`, `/cm/suggestions` | Consistency gaps and name-merge suggestions |
+| `/cm/changes` | Change management page: change requests, impact, verification scope |
+| `/cm/cr`, `/cm/cr/{code}` | Create / list / read change requests (targets: `UC-…`, `ED-…`, `state:Name`, `interface:Name`, `actor:Name`) |
+| `/cm/cr/{code}/impact`, `/scope` | Live impact and verification scope (JSON or `?format=csv`) |
+| `/cm/cr/{code}/assess` | Record the assessment with artefact versions, for audit |
+| `/cm/cr/{code}/report.xlsx` | Impact, verification scope and out-of-scope sheets (`?frozen=true` for the recorded one) |
+| `/cm/impact?target=…` | What-if impact without creating a change request |
+
+**Change management:** impact follows both layers. A changed use case reaches the use cases
+sharing its train states or interfaces; a changed interface or software state reaches the
+train states it realises and every use case in them; each impacted use case brings its tests,
+FMEAs, hazards and design. FMEA/hazard severity raises a safety flag. The verification scope
+lists tests to re-run, tests missing, FMEA/hazard re-reviews, design re-checks and a justified
+out-of-scope list. Variation orders flagged by VoxRail open a Draft change request automatically.
 
 The project is taken from the session cookie, or `?project_code=`. Disable with
 `VOXRAIL_PLUGINS=""`. Tests: `GROQ_API_KEY=dummy python -m pytest tests -q`.

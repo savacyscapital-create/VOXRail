@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
 from . import graph as g
+from . import change as ch
 from . import matrix as mx
 from .store import ENTITY_KINDS, ekey, get_store
 
@@ -38,14 +39,33 @@ class LinkIn(BaseModel):
     kind: str
 
 
+class TargetIn(BaseModel):
+    target: str                      # "UC-MP-001", "state:Ready to Drive", "interface:Door Closed Loop"
+    change_type: str = "modify"
+
+
+class CRIn(BaseModel):
+    title: str
+    description: str = ""
+    targets: list[TargetIn] = []
+
+
+class StatusIn(BaseModel):
+    status: str
+    note: str = ""
+
+
 def make_router(resolve_project_code: Callable[[str | None], str | None]) -> APIRouter:
     r = APIRouter(prefix="/cm", tags=["configuration-management"])
 
-    def store_for(project_code: str | None, cookie: str | None):
+    def code_for(project_code: str | None, cookie: str | None) -> str:
         code = project_code or resolve_project_code(cookie)
         if not code:
             raise HTTPException(404, "No project: pass ?project_code= or start a VoxRail session first")
-        return get_store(code)
+        return code
+
+    def store_for(project_code: str | None, cookie: str | None):
+        return get_store(code_for(project_code, cookie))
 
     def entity_key(store, kind: str, name_or_id: str) -> str:
         if name_or_id.isdigit():
@@ -140,6 +160,121 @@ def make_router(resolve_project_code: Callable[[str | None], str | None]) -> API
     @r.get("/matrices", response_class=HTMLResponse)
     def matrices_page():
         return HTMLResponse(_MATRIX_HTML)
+
+    # ── Change management (Phase 2) ───────────────────────────────────────────
+    def cr_call(fn, *a, **kw):
+        try:
+            return fn(*a, **kw)
+        except KeyError as e:
+            raise HTTPException(404, f"Change request {e} not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    def export(m: dict, fmt: str, filename: str):
+        if fmt == "csv":
+            return Response(mx.to_csv(m), media_type="text/csv",
+                            headers={"Content-Disposition": f'attachment; filename="{filename}.csv"'})
+        return m
+
+    @r.get("/cr")
+    def cr_list(project_code: str | None = None, voxrail_session: str | None = Cookie(default=None)):
+        return ch.list_crs(store_for(project_code, voxrail_session))
+
+    @r.post("/cr")
+    def cr_create(body: CRIn, project_code: str | None = None, voxrail_session: str | None = Cookie(default=None)):
+        code = code_for(project_code, voxrail_session)
+        s = get_store(code)
+        # validate targets before creating anything
+        for t in body.targets:
+            cr_call(ch.resolve_target, s, t.target)
+        return cr_call(ch.create_cr, s, code, body.title, body.description,
+                       [t.model_dump() for t in body.targets])
+
+    @r.get("/cr/{cr_code}")
+    def cr_get(cr_code: str, project_code: str | None = None, voxrail_session: str | None = Cookie(default=None)):
+        return cr_call(ch.get_cr, store_for(project_code, voxrail_session), cr_code)
+
+    @r.post("/cr/{cr_code}/targets")
+    def cr_add_target(cr_code: str, body: TargetIn, project_code: str | None = None,
+                      voxrail_session: str | None = Cookie(default=None)):
+        return cr_call(ch.add_target, store_for(project_code, voxrail_session), cr_code, body.target, body.change_type)
+
+    @r.delete("/cr/{cr_code}/targets")
+    def cr_remove_target(cr_code: str, node_key: str, project_code: str | None = None,
+                         voxrail_session: str | None = Cookie(default=None)):
+        return cr_call(ch.remove_target, store_for(project_code, voxrail_session), cr_code, node_key)
+
+    @r.post("/cr/{cr_code}/status")
+    def cr_status(cr_code: str, body: StatusIn, project_code: str | None = None,
+                  voxrail_session: str | None = Cookie(default=None)):
+        return cr_call(ch.set_status, store_for(project_code, voxrail_session), cr_code, body.status, body.note)
+
+    def _live(s, cr_code, include_actor_coupling):
+        targets = cr_call(ch.cr_targets, s, cr_code)
+        if not targets:
+            raise HTTPException(400, "Add at least one target to the change request first")
+        imp = ch.impact(s, targets, include_actor_coupling)
+        return imp, ch.verification_scope(s, imp)
+
+    @r.get("/cr/{cr_code}/impact")
+    def cr_impact(cr_code: str, include_actor_coupling: bool = False,
+                  format: str = Query("json", pattern="^(json|csv|matrix)$"),
+                  project_code: str | None = None, voxrail_session: str | None = Cookie(default=None)):
+        imp, _ = _live(store_for(project_code, voxrail_session), cr_code, include_actor_coupling)
+        if format == "json":
+            return imp
+        return export(ch.impact_matrix(imp), format, f"{cr_code}_impact")
+
+    @r.get("/cr/{cr_code}/scope")
+    def cr_scope(cr_code: str, include_actor_coupling: bool = False,
+                 format: str = Query("json", pattern="^(json|csv)$"),
+                 project_code: str | None = None, voxrail_session: str | None = Cookie(default=None)):
+        _, scope = _live(store_for(project_code, voxrail_session), cr_code, include_actor_coupling)
+        return export(scope, format, f"{cr_code}_verification_scope")
+
+    @r.post("/cr/{cr_code}/assess")
+    def cr_assess(cr_code: str, include_actor_coupling: bool = False, project_code: str | None = None,
+                  voxrail_session: str | None = Cookie(default=None)):
+        return cr_call(ch.assess, store_for(project_code, voxrail_session), cr_code, include_actor_coupling)
+
+    @r.get("/cr/{cr_code}/assessment")
+    def cr_assessment(cr_code: str, project_code: str | None = None,
+                      voxrail_session: str | None = Cookie(default=None)):
+        a = cr_call(ch.last_assessment, store_for(project_code, voxrail_session), cr_code)
+        if not a:
+            raise HTTPException(404, f"{cr_code} has not been assessed yet")
+        return a
+
+    @r.get("/cr/{cr_code}/report.xlsx")
+    def cr_report(cr_code: str, frozen: bool = False, include_actor_coupling: bool = False,
+                  project_code: str | None = None, voxrail_session: str | None = Cookie(default=None)):
+        s = store_for(project_code, voxrail_session)
+        if frozen:
+            a = cr_call(ch.last_assessment, s, cr_code)
+            if not a:
+                raise HTTPException(404, f"{cr_code} has not been assessed yet")
+            imp, scope = a["impact"], a["scope"]
+        else:
+            imp, scope = _live(s, cr_code, include_actor_coupling)
+        try:
+            data = mx.to_xlsx([ch.impact_matrix(imp), scope, ch.out_of_scope_matrix(scope)])
+        except ImportError:
+            raise HTTPException(501, "Excel export needs openpyxl: pip install openpyxl (CSV export still works)")
+        return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f'attachment; filename="{cr_code}_report.xlsx"'})
+
+    @r.get("/impact")
+    def what_if(target: list[str] = Query(...), include_actor_coupling: bool = False,
+                project_code: str | None = None, voxrail_session: str | None = Cookie(default=None)):
+        """What-if impact without a change request: /cm/impact?target=state:Ready to Drive"""
+        s = store_for(project_code, voxrail_session)
+        keys = [cr_call(ch.resolve_target, s, t) for t in target]
+        imp = ch.impact(s, keys, include_actor_coupling)
+        return {"impact": imp, "scope": ch.verification_scope(s, imp)}
+
+    @r.get("/changes", response_class=HTMLResponse)
+    def changes_page():
+        return HTMLResponse(_CHANGES_HTML)
 
     # ── Train state catalogue ─────────────────────────────────────────────────
     @r.get("/states")
@@ -281,7 +416,7 @@ _MATRIX_HTML = """<!doctype html>
 </header>
 <div class="bar"><span id="legend"></span><span id="totals"></span>
  <a id="csv" href="#">Export CSV</a><a id="xlsx" href="#">Export Excel (all matrices)</a>
- <a href="view">Graph view</a></div>
+ <a href="view">Graph view</a> <a href="changes">Change requests</a></div>
 <div class="wrap" id="out"><div class="empty">Loading…</div></div>
 <script>
 const MATS=[["uc_state","Use case × State"],["state_logic","State × Logic"],["uc_trace","Traceability"],["uc_uc","Use case × Use case"]];
@@ -326,5 +461,155 @@ async function load(){tabs(); const q=qs();
 f.onsubmit=e=>{e.preventDefault(); load();};
 f.onreset=()=>setTimeout(load,0);
 load();
+</script>
+</body></html>"""
+
+
+_CHANGES_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoxRail Change Management</title>
+<style>
+ :root{--bg:#f7f8fa;--fg:#1d2330;--muted:#5b6475;--line:#d9dde5;--head:#1f3864;--hit:#e2efda;--gap:#fce4d6;--card:#fff;--warn:#c00000}
+ *{box-sizing:border-box}
+ body{font-family:system-ui,sans-serif;margin:0;background:var(--bg);color:var(--fg);font-size:14px}
+ header{padding:12px 16px;background:var(--card);border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
+ h1{font-size:18px;margin:0} h2{font-size:15px;margin:0 0 8px} a{color:var(--head)}
+ main{display:grid;grid-template-columns:300px 1fr;gap:16px;padding:16px}
+ @media(max-width:800px){main{grid-template-columns:1fr}}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}
+ .cr{padding:8px;border:1px solid var(--line);border-radius:6px;margin-bottom:6px;cursor:pointer}
+ .cr.on{border-color:var(--head);box-shadow:0 0 0 1px var(--head)}
+ .cr small{color:var(--muted);display:block}
+ .pill{display:inline-block;font-size:11px;padding:1px 6px;border-radius:9px;background:#e8ecf4;margin-left:4px}
+ input,textarea,select{font:inherit;padding:5px 7px;border:1px solid var(--line);border-radius:5px;width:100%}
+ textarea{min-height:60px} label{display:block;margin:6px 0 2px;color:var(--muted);font-size:12px}
+ button{font:inherit;padding:5px 10px;border-radius:5px;border:1px solid var(--head);background:var(--head);color:#fff;cursor:pointer}
+ button.sec{background:var(--card);color:var(--head)}
+ .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+ .row>*{width:auto}
+ .chips span{display:inline-block;margin:0 6px 6px 0;padding:4px 8px;border-radius:6px;background:#eef1f6;font-size:12px}
+ .chips span.warn{background:var(--gap);color:var(--warn)}
+ .tabs button{margin-right:4px}
+ .wrap{overflow:auto;max-height:60vh;border:1px solid var(--line);margin-top:8px}
+ table{border-collapse:separate;border-spacing:0;font-size:12px}
+ th,td{border-right:1px solid var(--line);border-bottom:1px solid var(--line);padding:4px 6px;vertical-align:top}
+ thead th{position:sticky;top:0;background:var(--head);color:#fff;z-index:2;white-space:nowrap}
+ tbody th{position:sticky;left:0;background:var(--card);text-align:left;white-space:nowrap}
+ td{max-width:320px;min-width:120px} td.hit{background:var(--hit)} td.gapc{background:var(--gap)}
+ tr.gap th{background:var(--gap)} .muted{color:var(--muted)} .err{color:var(--warn)}
+ ul.t{margin:4px 0;padding-left:18px}
+</style></head>
+<body>
+<header><h1>VoxRail change management</h1>
+ <a href="matrices">Matrices</a><a href="view">Graph view</a><span class="muted" id="proj"></span></header>
+<main>
+ <section>
+  <div class="card"><h2>Change requests</h2><div id="list" class="muted">Loading…</div></div>
+  <div class="card" style="margin-top:12px"><h2>New change request</h2>
+   <form id="newcr">
+    <label>Title</label><input name="title" required>
+    <label>Description</label><textarea name="description"></textarea>
+    <label>Changed items, one per line (UC-…, ED-…, state:Name, interface:Name, actor:Name)</label>
+    <textarea name="targets" list="targets"></textarea>
+    <div class="row"><button>Create</button><button type="button" class="sec" id="whatif">What-if only</button></div>
+    <div id="newerr" class="err"></div>
+   </form>
+  </div>
+ </section>
+ <section class="card" id="detail"><p class="muted">Select or create a change request. "What-if only" shows the impact without saving a CR.</p></section>
+</main>
+<datalist id="tl"></datalist>
+<script>
+const page=new URLSearchParams(location.search), PC=page.get("project_code");
+const q=(o={})=>{const p=new URLSearchParams(o); if(PC) p.set("project_code",PC); return p.toString();};
+const el=(t,c,x)=>{const e=document.createElement(t); if(c) e.className=c; if(x!==undefined) e.textContent=x; return e;};
+async function api(path,opt={},params={}){const r=await fetch(path+"?"+q(params),opt); const j=await r.json().catch(()=>({}));
+ if(!r.ok) throw new Error(j.detail||r.statusText); return j;}
+const post=(path,body,params)=>api(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})},params);
+let cur=page.get("cr"), tab="impact", actors=false;
+if(PC) document.getElementById("proj").textContent="Project "+PC;
+
+async function loadList(){const l=document.getElementById("list");
+ try{const crs=await api("cr"); l.textContent=""; if(!crs.length) l.textContent="None yet.";
+  for(const c of crs){const d=el("div","cr"+(c.code===cur?" on":"")); d.appendChild(el("b","",c.code));
+   d.appendChild(el("span","pill",c.status)); if(c.origin==="variation_order") d.appendChild(el("span","pill","variation order"));
+   d.appendChild(el("small","",c.title)); d.onclick=()=>{cur=c.code; show();}; l.appendChild(d);}
+ }catch(e){l.textContent=e.message;}}
+
+function table(m){const w=el("div","wrap"); if(!m.rows.length){w.appendChild(el("p","muted","Nothing here.")); return w;}
+ const t=el("table"),h=el("thead"),tr=el("tr"); tr.appendChild(el("th","","Item"));
+ for(const f of m.row_fields) tr.appendChild(el("th","",f)); for(const c of m.columns) tr.appendChild(el("th","",c.label));
+ h.appendChild(tr); t.appendChild(h); const b=el("tbody");
+ for(const r of m.rows){const x=el("tr",r.gap?"gap":""); x.appendChild(el("th","",r.label));
+  for(const f of m.row_fields) x.appendChild(el("td","",r.fields[f]===undefined?"":String(r.fields[f])));
+  for(const c of m.columns){const v=r.cells[c.key]||""; x.appendChild(el("td",(r.gap_cols||[]).includes(c.key)?"gapc":(v?"hit":""),v));}
+  b.appendChild(x);} t.appendChild(b); w.appendChild(t); return w;}
+
+function chips(scope,imp){const d=el("div","chips"), s=scope.summary;
+ d.appendChild(el("span","",imp.items.length+" impacted items"));
+ d.appendChild(el("span","",s.use_cases_in_scope+" use cases in scope, "+s.use_cases_out_of_scope+" out"));
+ d.appendChild(el("span","","Re-run: "+(s.tests_to_rerun.join(", ")||"none")));
+ if(s.new_tests_needed.length) d.appendChild(el("span","warn","New tests needed: "+s.new_tests_needed.join(", ")));
+ if(s.safety_reviews.length) d.appendChild(el("span","warn","Safety re-review: "+s.safety_reviews.join(", ")));
+ return d;}
+
+function impactMatrix(imp){const cats=["Changed","Direct dependent","Coupled via state","Coupled via interface","Coupled via actor","Logical design","Indirect dependent"];
+ return {row_fields:["Type","Title","Severity","Safety"],columns:cats.map(c=>({key:c,label:c})),
+  rows:imp.items.map(i=>({label:i.label,fields:{Type:i.kind,Title:i.title,Severity:i.severity||"",Safety:i.safety?"Yes":""},cells:{[i.category]:i.reason},gap:i.missing}))};}
+function oosMatrix(scope){return {row_fields:["Title","Justification"],columns:[],rows:scope.out_of_scope.map(o=>({label:o.label,fields:{Title:o.title,Justification:o.justification},cells:{}}))};}
+
+function results(box,imp,scope,frozenNote){box.appendChild(chips(scope,imp));
+ if(frozenNote) box.appendChild(el("p","muted",frozenNote));
+ const tabs=el("div","tabs row"); for(const [k,v] of [["impact","Impact"],["scope","Verification scope"],["oos","Out of scope"]]){
+  const b=el("button",k===tab?"":"sec",v); b.type="button"; b.onclick=()=>{tab=k; show();}; tabs.appendChild(b);} box.appendChild(tabs);
+ box.appendChild(table(tab==="impact"?impactMatrix(imp):tab==="scope"?scope:oosMatrix(scope)));}
+
+async function show(){loadList(); const d=document.getElementById("detail"); d.textContent="";
+ const url=new URL(location.href); if(cur) url.searchParams.set("cr",cur); history.replaceState(null,"",url);
+ if(!cur){d.appendChild(el("p","muted","Select or create a change request.")); return;}
+ let cr; try{cr=await api("cr/"+cur);}catch(e){d.appendChild(el("p","err",e.message)); return;}
+ d.appendChild(el("h2","",cr.code+" · "+cr.title)); if(cr.description) d.appendChild(el("p","muted",cr.description));
+ const st=el("div","row"), sel=el("select"); for(const s of ["Draft","Open","Assessed","Approved","Implemented","Verified","Closed","Rejected"]){const o=el("option","",s); if(s===cr.status) o.selected=true; sel.appendChild(o);}
+ sel.onchange=async()=>{await post("cr/"+cur+"/status",{status:sel.value}); show();};
+ st.append(el("span","muted","Status"),sel); d.appendChild(st);
+ d.appendChild(el("b","","Changed items")); const ul=el("ul","t");
+ for(const t of cr.targets){const li=el("li","",t.label+" ("+t.kind+", "+t.change_type+") "); const x=el("a","","remove"); x.href="#";
+  x.onclick=async e=>{e.preventDefault(); await api("cr/"+cur+"/targets",{method:"DELETE"},{node_key:t.key}); show();}; li.appendChild(x); ul.appendChild(li);}
+ d.appendChild(ul);
+ const add=el("div","row"), inp=el("input"); inp.placeholder="UC-…, state:Name, interface:Name"; inp.setAttribute("list","tl"); inp.style.width="260px";
+ const ct=el("select"); for(const c of ["modify","add","remove"]) ct.appendChild(el("option","",c));
+ const ab=el("button","sec","Add item"), er=el("span","err");
+ ab.onclick=async()=>{try{await post("cr/"+cur+"/targets",{target:inp.value,change_type:ct.value}); show();}catch(e){er.textContent=e.message;}};
+ add.append(inp,ct,ab,er); d.appendChild(add);
+ const ctl=el("div","row"), cb=el("input"); cb.type="checkbox"; cb.checked=actors; cb.style.width="auto"; cb.onchange=()=>{actors=cb.checked; show();};
+ const lab=el("label"); lab.style.display="inline"; lab.append(cb," Include coupling through shared actors");
+ const as=el("button","","Assess and record"); as.onclick=async()=>{try{await post("cr/"+cur+"/assess",{}, {include_actor_coupling:actors}); show();}catch(e){alert(e.message);}};
+ ctl.append(lab,as); d.appendChild(ctl);
+ const ex=el("div","row"); const mk=(t,h)=>{const a=el("a","",t); a.href=h; return a;};
+ ex.append(mk("Impact CSV","cr/"+cur+"/impact?"+q({format:"csv",include_actor_coupling:actors})),
+  mk("Scope CSV","cr/"+cur+"/scope?"+q({format:"csv",include_actor_coupling:actors})),
+  mk("Excel report (live)","cr/"+cur+"/report.xlsx?"+q({include_actor_coupling:actors})));
+ if(cr.last_assessment) ex.append(mk("Excel report (recorded "+cr.last_assessment.created_at+")","cr/"+cur+"/report.xlsx?"+q({frozen:true})));
+ d.appendChild(ex);
+ if(!cr.targets.length){d.appendChild(el("p","muted","Add a changed item to see the impact.")); return;}
+ try{const [imp,scope]=await Promise.all([api("cr/"+cur+"/impact",{}, {include_actor_coupling:actors}),api("cr/"+cur+"/scope",{}, {include_actor_coupling:actors})]);
+  let note=""; if(cr.last_assessment){const a=await api("cr/"+cur+"/assessment"); note="Live view. Last recorded assessment: "+a.created_at+
+   (a.artefacts_changed_since.length?" (changed since: "+a.artefacts_changed_since.join(", ")+")":" (nothing changed since)");}
+  results(d,imp,scope,note);}catch(e){d.appendChild(el("p","err",e.message));}}
+
+document.getElementById("newcr").onsubmit=async e=>{e.preventDefault(); const f=e.target, err=document.getElementById("newerr"); err.textContent="";
+ const targets=f.elements.targets.value.split("\\n").map(s=>s.trim()).filter(Boolean).map(t=>({target:t}));
+ try{const cr=await post("cr",{title:f.elements.title.value,description:f.elements.description.value,targets}); cur=cr.code; f.reset(); show();}catch(x){err.textContent=x.message;}};
+document.getElementById("whatif").onclick=async()=>{const f=document.getElementById("newcr"), err=document.getElementById("newerr"); err.textContent="";
+ const t=f.elements.targets.value.split("\\n").map(s=>s.trim()).filter(Boolean); if(!t.length){err.textContent="List at least one changed item."; return;}
+ const p=new URLSearchParams(q({include_actor_coupling:actors})); for(const x of t) p.append("target",x);
+ try{const r=await fetch("impact?"+p); const j=await r.json(); if(!r.ok) throw new Error(j.detail); cur=null;
+  const d=document.getElementById("detail"); d.textContent=""; d.appendChild(el("h2","","What-if: "+t.join(", ")));
+  results(d,j.impact,j.scope,"Not saved. Create the change request to record it.");}catch(x){err.textContent=x.message;}};
+
+(async()=>{try{const [arts,ents]=await Promise.all([api("artefacts"),api("entities")]); const dl=document.getElementById("tl");
+ for(const a of arts) dl.appendChild(Object.assign(el("option"),{value:a.ref}));
+ for(const e of ents) if(e.kind!=="sw_element") dl.appendChild(Object.assign(el("option"),{value:e.kind+":"+e.name}));}catch(e){}})();
+show();
 </script>
 </body></html>"""
