@@ -33,7 +33,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import uvicorn
 
-from main import VoxRailSession, chat, log_interaction, PLUGINS
+from main import VoxRailSession, chat, log_interaction, load_projects, PLUGINS
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -104,7 +104,7 @@ def get_or_create_session(
 async def lifespan(app: FastAPI):
     logger.info("VoxRail v3.0 starting — checking LLM connectivity...")
     try:
-        probe = VoxRailSession("probe")
+        probe = VoxRailSession("probe", register=False)
         chat(probe, "Reply with exactly: OK")
         logger.info("✅ LLM connectivity confirmed")
     except Exception as e:
@@ -146,6 +146,7 @@ class ChatResponse(BaseModel):
     sd_counter:   int
     train_type:   str | None
     project:      str
+    project_code: str
 
 
 # ── Cookie helper ──────────────────────────────────────────────────────────────
@@ -212,6 +213,7 @@ async def chat_endpoint(
         sd_counter   = session.sd_counter,
         train_type   = session.train_type,
         project      = session.project_name,
+        project_code = session.project_code,
     )
     json_response = JSONResponse(content=payload.model_dump())
     attach_session_cookie(json_response, session_id)
@@ -229,6 +231,13 @@ async def health():
         "artefacts":       ["UC", "TC", "SD", "FM", "HZ", "ED", "CC"],
         "plugins":         [getattr(p, "name", str(p)) for p in PLUGINS],
     }
+
+
+@app.get("/projects")
+async def projects():
+    """Registered projects: unique code, name, created, artefact counters."""
+    return [{"project_code": code, **{k: v for k, v in e.items() if k != "key"}}
+            for code, e in load_projects().items()]
 
 
 @app.get("/session/info")

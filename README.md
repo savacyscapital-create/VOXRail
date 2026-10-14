@@ -80,7 +80,9 @@ voxrail/
 ├── .env.example         # Environment template
 ├── voxrail_interactions.json   # Generated at runtime — gitignored
 ├── voxrail_artefacts.json      # Generated at runtime — gitignored
-└── voxrail_cm_data/            # Configuration graphs, one SQLite DB per project — gitignored
+└── voxrail_cm_data/            # Project data — gitignored (set VOXRAIL_CM_DIR to move it)
+    ├── projects.json           #   project registry: unique code + reference counters per project
+    └── <CODE>.db               #   configuration graph + change requests, one per project
 ```
 
 **Stack:**
@@ -125,6 +127,7 @@ VOXRAIL_DEV=true python app.py
 | `/health` | GET | Server status and active session count |
 | `/session/info` | GET | Current session artefact counters and memory state |
 | `/session/reset` | DELETE | Clear current session (testing) |
+| `/projects` | GET | Registered projects with their unique codes and reference counters |
 
 ---
 
@@ -163,6 +166,10 @@ train states it realises and every use case in them; each impacted use case brin
 FMEAs, hazards and design. FMEA/hazard severity raises a safety flag. The verification scope
 lists tests to re-run, tests missing, FMEA/hazard re-reviews, design re-checks and a justified
 out-of-scope list. Variation orders flagged by VoxRail open a Draft change request automatically.
+
+**Project codes:** each project name gets a unique code from `projects.json` (initials, with a
+numeric suffix if another project already uses them: MP, MP2, …). Reopening the same project name
+resumes its code and its UC/TC/FM/HZ/ED/SD/CC numbering, even after a server restart.
 
 The project is taken from the session cookie, or `?project_code=`. Disable with
 `VOXRAIL_PLUGINS=""`. Tests: `GROQ_API_KEY=dummy python -m pytest tests -q`.
