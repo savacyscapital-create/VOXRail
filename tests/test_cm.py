@@ -355,3 +355,131 @@ def test_matrix_api(env):
     assert x.status_code == 200 and x.content[:2] == b"PK"
     assert c.get("/cm/matrix/nope", params=q).status_code == 404
     assert "VoxRail configuration matrices" in c.get("/cm/matrices").text
+
+
+# ── Phase 2: change management ────────────────────────────────────────────────
+FM_CRIT = FM1.replace("**Failure Mode**:", "**Severity**: Critical\n**Failure Mode**:")
+
+
+def _cm_store(env, *extra):
+    s = env.VoxRailSession("Metro Project")
+    feed(env, s, UC1, UC2, UC3, ED1, SD1, TC1, FM_CRIT, HZ1, CC1, *extra)
+    from voxrail_cm.store import get_store
+    return get_store(s.project_code)
+
+
+def _cats(imp):
+    return {i["key"] if i["kind"] in ("UC", "TC", "FM", "HZ", "ED", "SD", "CC") else f'{i["kind"]}:{i["label"]}':
+            i["category"] for i in imp["items"]}
+
+
+def test_impact_of_use_case_change(env):
+    from voxrail_cm import change as ch
+    st = _cm_store(env)
+    imp = ch.impact(st, ["UC-MP-002"])
+    c = _cats(imp)
+    assert c["UC-MP-002"] == "Changed"
+    assert c["UC-MP-001"] == "Coupled via state"           # shares Ready to Drive
+    assert "UC-MP-003" not in c                             # Stabled only: out of scope
+    assert c["TC-MP-001"] == "Indirect dependent"           # test of the coupled UC
+    assert c["interface:Door Closed Loop"] == "Logical design"
+    assert c["state:Ready to Drive"] == "Coupled via state"
+    # actor coupling is opt-in; UC-003's actor (Maintainer) is not shared, so it stays out
+    assert "UC-MP-003" not in _cats(ch.impact(st, ["UC-MP-002"], include_actor_coupling=True))
+
+
+def test_impact_of_interface_change_reaches_use_cases_through_states(env):
+    from voxrail_cm import change as ch
+    st = _cm_store(env)
+    key = ch.resolve_target(st, "interface:Door Release Command")
+    c = _cats(ch.impact(st, [key]))
+    assert c["interface:Door Release Command"] == "Changed"
+    assert c["ED-MP-001"] == "Direct dependent"
+    assert c["state:Stopped at Platform"] == "Direct dependent"
+    assert c["UC-MP-001"] == "Coupled via state"
+    assert c["UC-MP-002"] == "Coupled via state"            # Ready to Drive is served by the same interface
+    assert "UC-MP-003" not in c
+
+
+def test_impact_of_state_change_and_safety_flags(env):
+    from voxrail_cm import change as ch
+    st = _cm_store(env)
+    imp = ch.impact(st, [ch.resolve_target(st, "state:Stopped at Platform")])
+    items = {i["key"]: i for i in imp["items"]}
+    assert items["FM-MP-001"]["severity"] == "Critical" and items["FM-MP-001"]["safety"]
+    assert items["HZ-MP-001"]["safety"]
+    assert items["UC-MP-001"]["safety"]
+    assert set(imp["safety_items"]) >= {"FM-MP-001", "HZ-MP-001", "UC-MP-001"}
+
+
+def test_verification_scope(env):
+    from voxrail_cm import change as ch
+    st = _cm_store(env)
+    imp = ch.impact(st, ["UC-MP-002"])
+    sc = ch.verification_scope(st, imp)
+    rows = {r["key"]: r for r in sc["rows"]}
+    assert rows["UC-MP-001"]["cells"]["rerun_tests"] == "TC-MP-001"
+    assert rows["UC-MP-001"]["cells"]["hazard"] == "HZ-MP-001"
+    assert rows["UC-MP-002"]["cells"]["new_test"].startswith("Yes")
+    assert sc["summary"]["tests_to_rerun"] == ["TC-MP-001"]
+    assert sc["summary"]["new_tests_needed"] == ["UC-MP-002"]
+    assert [o["key"] for o in sc["out_of_scope"]] == ["UC-MP-003"]
+
+
+def test_cr_lifecycle_and_frozen_assessment(env):
+    from voxrail_cm import change as ch
+    st = _cm_store(env)
+    cr = ch.create_cr(st, "MP", "Change door release logic", targets=[{"target": "ED-MP-001"}])
+    assert cr["code"] == "CR-MP-001" and cr["status"] == "Open"
+    with pytest.raises(ValueError):
+        ch.add_target(st, "CR-MP-001", "state:Nowhere")
+    ch.add_target(st, "CR-MP-001", "state:Ready to Drive")
+    res = ch.assess(st, "CR-MP-001")
+    assert res["cr"]["status"] == "Assessed"
+    a = ch.last_assessment(st, "CR-MP-001")
+    assert a["artefacts_changed_since"] == []
+    # regenerate UC-001 after assessment -> assessment reports it changed
+    s = env.VoxRailSession("Metro Project")
+    feed(env, s, UC1.replace("2 s", "3 s"))
+    assert ch.last_assessment(st, "CR-MP-001")["artefacts_changed_since"] == ["UC-MP-001"]
+    ch.set_status(st, "CR-MP-001", "Approved", "CCB 14 Oct")
+    assert any("Approved" in h["event"] for h in ch.get_cr(st, "CR-MP-001")["history"])
+
+
+def test_variation_order_creates_draft_cr(env):
+    from voxrail_cm import change as ch
+    vo = "⚠️ VARIATION ORDER DETECTED: Add cab heating pre-conditioning\n\n" + UC3
+    st = _cm_store(env, vo)
+    crs = ch.list_crs(st)
+    assert len(crs) == 1 and crs[0]["status"] == "Draft" and crs[0]["origin"] == "variation_order"
+    assert crs[0]["title"] == "Add cab heating pre-conditioning"
+    assert [t["key"] for t in crs[0]["targets"]] == ["UC-MP-003"]
+
+
+def test_change_api(env):
+    import io as _io
+    from fastapi.testclient import TestClient
+    from openpyxl import load_workbook
+    import app as webapp
+    _cm_store(env)
+    c = TestClient(webapp.app)
+    q = {"project_code": "MP"}
+    assert c.post("/cm/cr", params=q, json={"title": "x", "targets": [{"target": "UC-XX-999"}]}).status_code == 400
+    cr = c.post("/cm/cr", params=q, json={"title": "Traction enable timing",
+                                          "targets": [{"target": "UC-MP-002"}]}).json()
+    code = cr["code"]
+    imp = c.get(f"/cm/cr/{code}/impact", params=q).json()
+    assert any(i["key"] == "UC-MP-001" for i in imp["items"])
+    assert "Coupled via state" in c.get(f"/cm/cr/{code}/impact", params={**q, "format": "csv"}).text
+    scope = c.get(f"/cm/cr/{code}/scope", params=q).json()
+    assert scope["summary"]["tests_to_rerun"] == ["TC-MP-001"]
+    assert c.get(f"/cm/cr/{code}/assessment", params=q).status_code == 404
+    assert c.post(f"/cm/cr/{code}/assess", params=q).json()["cr"]["status"] == "Assessed"
+    x = c.get(f"/cm/cr/{code}/report.xlsx", params={**q, "frozen": "true"})
+    assert load_workbook(_io.BytesIO(x.content)).sheetnames == ["impact", "verification_scope", "out_of_scope"]
+    assert c.post(f"/cm/cr/{code}/status", params=q, json={"status": "Bogus"}).status_code == 400
+    assert c.get("/cm/cr/CR-MP-999", params=q).status_code == 404
+    wi = c.get("/cm/impact", params=[("project_code", "MP"), ("target", "state:Stabled")]).json()
+    assert [i["key"] for i in wi["impact"]["items"] if i["kind"] == "UC"] == ["UC-MP-003"]
+    assert len(c.get("/cm/cr", params=q).json()) == 1
+    assert "VoxRail change management" in c.get("/cm/changes").text
