@@ -213,3 +213,6 @@ voxrail_artefacts.json
 *.json
 __pycache__/
 *.pyc
+
+# Configuration management plugin (per-project SQLite graphs)
+voxrail_cm_data/

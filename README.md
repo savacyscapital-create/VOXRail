@@ -72,11 +72,15 @@ All artefacts are cross-referenced with auto-incrementing project codes
 voxrail/
 ├── main.py              # VoxRailSession, system prompt, LLM chat, logging
 ├── app.py               # FastAPI server, session store, cookie management
+├── voxrail_cm/          # Configuration management plugin (links, matrices, /cm routes)
+├── tests/               # pytest suite for the plugin (LLM stubbed)
+├── docs/                # Design notes
 ├── templates/
 │   └── index.html       # Web UI — Mermaid rendering, artefact badges, PNG export
 ├── .env.example         # Environment template
 ├── voxrail_interactions.json   # Generated at runtime — gitignored
-└── voxrail_artefacts.json      # Generated at runtime — gitignored
+├── voxrail_artefacts.json      # Generated at runtime — gitignored
+└── voxrail_cm_data/            # Configuration graphs, one SQLite DB per project — gitignored
 ```
 
 **Stack:**
@@ -96,7 +100,7 @@ git clone https://github.com/SavacysCapital/voxrail.git
 cd voxrail
 
 # 2. Install dependencies
-pip install fastapi uvicorn langchain-groq langchain-core python-dotenv pydantic
+pip install -r requirements.txt
 
 # 3. Configure
 cp .env.example .env
@@ -121,6 +125,35 @@ VOXRAIL_DEV=true python app.py
 | `/health` | GET | Server status and active session count |
 | `/session/info` | GET | Current session artefact counters and memory state |
 | `/session/reset` | DELETE | Clear current session (testing) |
+
+---
+
+## Configuration Management Plugin
+
+Every artefact VoxRail generates is linked into a per-project configuration graph
+(`voxrail_cm_data/<PROJECT_CODE>.db`), on two layers with the **train state** as the hub:
+
+- **Layer 1 — use case level:** use cases ↔ train states (one or many) and actors;
+  TC / FMEA / Hazard ↔ use cases.
+- **Layer 2 — logical level:** train states ↔ electrical interfaces (from ED) and
+  software states (from SD).
+
+Existing state / actor / interface names are fed back into the prompt so they are reused;
+near-duplicate names are suggested for merging, never merged silently.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/cm/matrices` | Filterable matrices: UC × State, State × Logic, Traceability, UC × UC |
+| `/cm/matrix/{name}` | Matrix as JSON, or `?format=csv` |
+| `/cm/matrix.xlsx` | All matrices in one Excel workbook (needs `openpyxl`) |
+| `/cm/view` | Graph diagram (best for small projects / focused views) |
+| `/cm/states`, `/cm/states/{name}` | Train state catalogue and per-state view |
+| `/cm/uc/{ref}/coupled` | Use cases coupled through shared states / actors / interfaces |
+| `/cm/gaps`, `/cm/suggestions` | Consistency gaps and name-merge suggestions |
+
+The project is taken from the session cookie, or `?project_code=`. Disable with
+`VOXRAIL_PLUGINS=""`. Tests: `GROQ_API_KEY=dummy python -m pytest tests -q`.
+Design: [`docs/config-management-plugin.md`](docs/config-management-plugin.md).
 
 ---
 
