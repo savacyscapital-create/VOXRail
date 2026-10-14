@@ -222,7 +222,7 @@ def test_gaps(env):
 def test_prompt_context_and_no_db_for_plain_chat(env, tmp_path):
     s = env.VoxRailSession("Probe")
     feed(env, s, "OK")
-    assert not list(tmp_path.iterdir())                         # plain replies create nothing
+    assert not list(tmp_path.glob("*.db"))                      # plain replies create no graph
     assert "=== CONFIGURATION CATALOGUE" not in env.build_system_prompt(s)
     feed(env, s, UC1.replace("UC-MP-", "UC-P-"))
     p = env.build_system_prompt(s)
@@ -483,3 +483,39 @@ def test_change_api(env):
     assert [i["key"] for i in wi["impact"]["items"] if i["kind"] == "UC"] == ["UC-MP-003"]
     assert len(c.get("/cm/cr", params=q).json()) == 1
     assert "VoxRail change management" in c.get("/cm/changes").text
+
+
+# ── Unique project codes ──────────────────────────────────────────────────────
+def test_same_initials_get_unique_codes(env):
+    a = env.VoxRailSession("Metro Project")
+    b = env.VoxRailSession("Mainline Programme")
+    c = env.VoxRailSession("Main Platform")
+    assert (a.project_code, b.project_code, c.project_code) == ("MP", "MP2", "MP3")
+    # same name (any case / spacing) resumes the same project
+    assert env.VoxRailSession("  metro   PROJECT ").project_code == "MP"
+
+
+def test_counters_survive_restart_and_tabs(env):
+    s = env.VoxRailSession("Metro Project")
+    s.update_from_response(UC1)
+    s.update_from_response(UC2)
+    assert s.peek_uc_ref() == "UC-MP-003"
+    again = env.VoxRailSession("Metro Project")          # server restart / new tab
+    assert again.peek_uc_ref() == "UC-MP-003"
+    again.update_from_response(UC3)                       # tab 2 creates UC-MP-003
+    s.sync_counters()                                     # tab 1 catches up before its next chat
+    assert s.peek_uc_ref() == "UC-MP-004"
+
+
+def test_probe_session_not_registered(env, tmp_path):
+    env.VoxRailSession("probe", register=False)
+    assert not (tmp_path / "projects.json").exists()
+
+
+def test_projects_endpoint(env):
+    from fastapi.testclient import TestClient
+    import app as webapp
+    env.VoxRailSession("Metro Project")
+    env.VoxRailSession("Mainline Programme")
+    codes = [p["project_code"] for p in TestClient(webapp.app).get("/projects").json()]
+    assert codes == ["MP", "MP2"]

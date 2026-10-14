@@ -38,6 +38,7 @@ import re
 import json
 import logging
 import importlib
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -115,15 +116,84 @@ def emit(hook: str, *args) -> list:
 load_plugins()
 
 
+# ── Project registry ───────────────────────────────────────────────────────────
+# Gives every project a unique code and remembers its artefact counters, so
+# references never collide between projects or restart at 001 after a restart.
+# Same project name (case/spacing-insensitive) → same code; a different name
+# with the same initials gets a numeric suffix (MP, MP2, MP3, ...).
+_REGISTRY_LOCK = threading.Lock()
+COUNTER_KEYS = ("uc", "tc", "fmea", "hz", "elec", "code", "sd")
+
+
+def projects_file() -> str:
+    return os.getenv("VOXRAIL_PROJECTS_FILE") or os.path.join(
+        os.getenv("VOXRAIL_CM_DIR", "voxrail_cm_data"), "projects.json")
+
+
+def load_projects() -> dict:
+    try:
+        with open(projects_file(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def _save_projects(reg: dict) -> None:
+    path = projects_file()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(reg, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def project_key(name: str) -> str:
+    return " ".join(name.lower().split())
+
+
+def register_project(name: str, base_code: str) -> tuple[str, dict]:
+    """Return (unique code, saved counters) for a project name, registering it if new."""
+    key = project_key(name)
+    with _REGISTRY_LOCK:
+        reg = load_projects()
+        for code, entry in reg.items():
+            if entry.get("key") == key:
+                return code, entry.get("counters", {})
+        code, n = base_code, 2
+        while code in reg:
+            code = f"{base_code}{n}"
+            n += 1
+        reg[code] = {"name": name.strip(), "key": key,
+                     "created": datetime.now().isoformat(timespec="seconds"), "counters": {}}
+        _save_projects(reg)
+        return code, {}
+
+
+def save_project_counters(code: str, counters: dict) -> None:
+    with _REGISTRY_LOCK:
+        reg = load_projects()
+        if code in reg:
+            reg[code]["counters"] = counters
+            _save_projects(reg)
+
+
 # ── Session ────────────────────────────────────────────────────────────────────
 class VoxRailSession:
     """
     Holds all state for a single engineering session.
     One session = one browser tab = one project.
+
+    register=True gives the project a unique code from the project registry and
+    resumes its counters; register=False (connectivity probes) touches nothing.
     """
-    def __init__(self, project_name: str):
+    def __init__(self, project_name: str, register: bool = True):
         self.project_name  = project_name
-        self.project_code  = self._make_code(project_name)
+        self._registered   = register
+        saved: dict = {}
+        if register:
+            self.project_code, saved = register_project(project_name, self._make_code(project_name))
+        else:
+            self.project_code = self._make_code(project_name)
         self.train_type: str | None = None
 
         # ── Artefact memory ──────────────────────────────────
@@ -142,6 +212,9 @@ class VoxRailSession:
         self._elec_counter: int = 0
         self._code_counter: int = 0
         self._sd_counter:   int = 0
+        for k in COUNTER_KEYS:
+            setattr(self, f"_{k}_counter", int(saved.get(k, 0)))
+        self._saved_counters = {k: getattr(self, f"_{k}_counter") for k in COUNTER_KEYS}
 
         # ── Conversation history ─────────────────────────────
         self.history: list = []
@@ -152,8 +225,18 @@ class VoxRailSession:
 
     @staticmethod
     def _make_code(name: str) -> str:
-        words = name.strip().split()
-        return "".join(w[0].upper() for w in words if w) or "VR"
+        words = re.findall(r"[A-Za-z0-9]+", name)
+        return "".join(w[0].upper() for w in words) or "VR"
+
+    def sync_counters(self) -> None:
+        """Catch up with counters saved by another session (e.g. a second browser tab) on the same project."""
+        if not self._registered:
+            return
+        saved = load_projects().get(self.project_code, {}).get("counters", {})
+        for k in COUNTER_KEYS:
+            if int(saved.get(k, 0)) > getattr(self, f"_{k}_counter"):
+                setattr(self, f"_{k}_counter", int(saved[k]))
+        self._saved_counters = {k: getattr(self, f"_{k}_counter") for k in COUNTER_KEYS}
 
     # ── Read-only properties ──────────────────────────────────────────────────
     @property
@@ -231,6 +314,12 @@ class VoxRailSession:
                     "timestamp": datetime.now().isoformat(),
                     "detail":    line.strip()
                 })
+
+        if self._registered:
+            counters = {k: getattr(self, f"_{k}_counter") for k in COUNTER_KEYS}
+            if counters != self._saved_counters:
+                save_project_counters(self.project_code, counters)
+                self._saved_counters = counters
 
     # ── Train type detection ──────────────────────────────────────────────────
     def detect_train_type(self, text: str) -> None:
@@ -617,6 +706,7 @@ RULES  (apply to every response without exception)
 
 # ── Core chat ──────────────────────────────────────────────────────────────────
 def chat(session: VoxRailSession, user_input: str) -> str:
+    session.sync_counters()
     session.detect_train_type(user_input)
     session.history.append(HumanMessage(content=user_input))
 
